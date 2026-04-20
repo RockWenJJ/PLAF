@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>PLAF 3D Point Cloud Viewer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;overflow:hidden;font-family:'Consolas','Courier New',monospace}
+canvas{display:block}
+#hud{position:absolute;top:0;left:0;right:0;padding:10px 16px;
+  background:linear-gradient(180deg,rgba(0,0,0,0.75) 0%,rgba(0,0,0,0) 100%);
+  color:#eee;pointer-events:none;z-index:10}
+#hud h2{font-size:15px;font-weight:600;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#hud .stats{font-size:11px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#panel{position:absolute;bottom:12px;left:12px;padding:8px 14px;
+  background:rgba(0,0,0,0.75);border:1px solid #333;border-radius:6px;
+  color:#ccc;font-size:12px;display:flex;gap:14px;align-items:center;z-index:10}
+#panel label{display:flex;align-items:center;gap:5px;cursor:pointer}
+#panel input[type="range"]{width:90px}
+input[type="checkbox"]{accent-color:#4a9eff}
+#loading{position:absolute;top:0;left:0;right:0;bottom:0;background:#111;
+  color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;z-index:100}
+#colorbar{position:absolute;top:60px;right:16px;width:16px;height:180px;
+  border-radius:3px;border:1px solid #444;z-index:10}
+#colorbar-labels{position:absolute;top:60px;right:38px;height:180px;
+  display:none;flex-direction:column;justify-content:space-between;
+  color:#888;font-size:10px;z-index:10}
+#keys{position:absolute;bottom:12px;right:12px;padding:6px 10px;
+  background:rgba(0,0,0,0.6);border-radius:4px;color:#555;font-size:10px;z-index:10}
+</style>
+</head><body>
+<div id="hud"><h2 id="title">Loading...</h2><div class="stats" id="stats"></div></div>
+<div id="panel">
+ <label>Size <input type="range" id="ptSize" min="0.001" max="0.5" step="0.001" value="0.02">
+  <span id="ptLabel">-</span></label>
+ <label><input type="checkbox" id="gridToggle" checked> Grid</label>
+ <label><input type="checkbox" id="axesToggle" checked> Axes</label>
+ <label><input type="checkbox" id="bgToggle"> Light</label>
+ <label><input type="checkbox" id="autoRotate"> Rotate</label>
+</div>
+<div id="keys">R: reset &nbsp; G: grid &nbsp; A: axes &nbsp; +/-: size</div>
+<div id="loading">Loading point cloud...</div>
+<div id="colorbar" style="display:none"></div>
+<div id="colorbar-labels"><span>1.0</span><span>0.5</span><span>0.0</span></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function(){
+var scene,camera,renderer,controls,pc;
+var gridHelper,axesHelper,bboxHelper;
+var curGen=0,nPts=0,sceneSize=1;
+var pcCenter=new THREE.Vector3(),pcSize=new THREE.Vector3();
+
+// Soft circular point texture (no square blocks)
+function makePointTex(){
+  var c=document.createElement('canvas');c.width=64;c.height=64;
+  var ctx=c.getContext('2d');
+  var g=ctx.createRadialGradient(32,32,0,32,32,32);
+  g.addColorStop(0,'rgba(255,255,255,1.0)');
+  g.addColorStop(0.35,'rgba(255,255,255,0.95)');
+  g.addColorStop(0.65,'rgba(255,255,255,0.5)');
+  g.addColorStop(1.0,'rgba(255,255,255,0.0)');
+  ctx.fillStyle=g;ctx.fillRect(0,0,64,64);
+  return new THREE.CanvasTexture(c);
+}
+var ptTex=makePointTex();
+
+// Estimate good point size from nearest-neighbor distances
+function estimatePointSize(pos){
+  var n=pos.length/3; if(n<2) return sceneSize*0.003;
+  var sampleN=Math.min(n,5000), step=Math.max(1,Math.floor(n/sampleN));
+  var dists=[];
+  for(var i=0;i<n&&dists.length<sampleN;i+=step){
+    var xi=pos[i*3],yi=pos[i*3+1],zi=pos[i*3+2];
+    var best=Infinity;
+    for(var j=i+1;j<Math.min(i+50,n);j++){
+      var dx=xi-pos[j*3],dy=yi-pos[j*3+1],dz=zi-pos[j*3+2];
+      var d2=dx*dx+dy*dy+dz*dz;
+      if(d2<best)best=d2;
+    }
+    if(best<Infinity)dists.push(Math.sqrt(best));
+  }
+  if(!dists.length) return sceneSize*0.003;
+  dists.sort(function(a,b){return a-b});
+  var med=dists[Math.floor(dists.length*0.5)];
+  return Math.max(med*2.5, sceneSize*0.0005);
+}
+
+async function init(){
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x111111);
+  camera=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,0.001,10000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth,innerHeight);
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  document.body.appendChild(renderer.domElement);
+  controls=new THREE.OrbitControls(camera,renderer.domElement);
+  controls.enableDamping=true;controls.dampingFactor=0.08;
+  controls.rotateSpeed=0.8;controls.zoomSpeed=1.2;
+  controls.panSpeed=0.8;controls.screenSpacePanning=true;
+  await loadPC();
+  document.getElementById('loading').style.display='none';
+  setInterval(poll,400);
+
+  document.getElementById('ptSize').oninput=function(e){
+    var v=parseFloat(e.target.value);
+    if(pc)pc.material.size=v;
+    document.getElementById('ptLabel').textContent=v.toFixed(4);
+  };
+  document.getElementById('gridToggle').onchange=function(e){
+    if(gridHelper)gridHelper.visible=e.target.checked;
+  };
+  document.getElementById('axesToggle').onchange=function(e){
+    if(axesHelper)axesHelper.visible=e.target.checked;
+  };
+  document.getElementById('bgToggle').onchange=function(e){
+    scene.background=new THREE.Color(e.target.checked?0xf0f0f0:0x111111);
+  };
+  document.getElementById('autoRotate').onchange=function(e){
+    controls.autoRotate=e.target.checked;controls.autoRotateSpeed=1.5;
+  };
+
+  addEventListener('keydown',function(e){
+    if(e.target.tagName==='INPUT')return;
+    var sl=document.getElementById('ptSize');
+    if(e.key==='r'||e.key==='R')resetCamera();
+    if(e.key==='g'||e.key==='G'){
+      document.getElementById('gridToggle').checked=!document.getElementById('gridToggle').checked;
+      if(gridHelper)gridHelper.visible=document.getElementById('gridToggle').checked;
+    }
+    if(e.key==='a'||e.key==='A'){
+      document.getElementById('axesToggle').checked=!document.getElementById('axesToggle').checked;
+      if(axesHelper)axesHelper.visible=document.getElementById('axesToggle').checked;
+    }
+    if(e.key==='='||e.key==='+'){
+      sl.value=Math.min(parseFloat(sl.max),parseFloat(sl.value)*1.3);sl.oninput(sl);
+    }
+    if(e.key==='-'){
+      sl.value=Math.max(parseFloat(sl.min),parseFloat(sl.value)/1.3);sl.oninput(sl);
+    }
+  });
+  addEventListener('resize',function(){
+    camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth,innerHeight);
+  });
+  animate();
+}
+
+function resetCamera(){
+  if(!pc)return;
+  var d=sceneSize;
+  camera.position.set(pcCenter.x+d*0.9,pcCenter.y+d*0.7,pcCenter.z+d*0.9);
+  camera.near=d*0.0001;camera.far=d*20;camera.updateProjectionMatrix();
+  controls.target.copy(pcCenter);controls.update();
+}
+
+function addHelpers(center,size){
+  if(gridHelper)scene.remove(gridHelper);
+  if(axesHelper)scene.remove(axesHelper);
+  if(bboxHelper)scene.remove(bboxHelper);
+
+  // Grid at bottom of point cloud
+  var gDiv=Math.min(100,Math.max(4,Math.round(size/0.1)));
+  gridHelper=new THREE.GridHelper(size*1.5,gDiv,0x444444,0x222222);
+  gridHelper.position.set(center.x,pc.geometry.boundingBox.min.y-size*0.005,center.z);
+  gridHelper.material.transparent=true;gridHelper.material.opacity=0.4;
+  scene.add(gridHelper);
+
+  // Axes (RGB = XYZ)
+  axesHelper=new THREE.AxesHelper(size*0.12);
+  axesHelper.position.copy(center);
+  scene.add(axesHelper);
+
+  // Bounding box wireframe
+  var bGeo=new THREE.BoxGeometry(pcSize.x,pcSize.y,pcSize.z);
+  var bEdge=new THREE.EdgesGeometry(bGeo);
+  bboxHelper=new THREE.LineSegments(bEdge,new THREE.LineBasicMaterial({
+    color:0x555555,transparent:true,opacity:0.25}));
+  bboxHelper.position.copy(center);
+  scene.add(bboxHelper);
+}
+
+async function loadPC(){
+  var m=await fetch('/api/meta').then(function(r){return r.json()});
+  nPts=m.num_points;
+  document.getElementById('title').textContent=m.query;
+  document.getElementById('stats').textContent='Points: '+nPts.toLocaleString()+' | drag=rotate  scroll=zoom  shift+drag=pan';
+  var pos=new Float32Array(await(await fetch('/api/points.bin')).arrayBuffer());
+  var col=new Float32Array(await(await fetch('/api/colors.bin')).arrayBuffer());
+  if(pc){scene.remove(pc);pc.geometry.dispose();pc.material.dispose();}
+
+  var geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('color',new THREE.BufferAttribute(col,3));
+  geo.computeBoundingBox();
+  geo.boundingBox.getCenter(pcCenter);
+  geo.boundingBox.getSize(pcSize);
+  sceneSize=Math.max(pcSize.x,pcSize.y,pcSize.z);
+
+  // Auto point size
+  var autoSz=estimatePointSize(pos);
+  var sl=document.getElementById('ptSize');
+  sl.value=autoSz; sl.min=Math.max(0.0002,autoSz*0.05);
+  sl.max=autoSz*30; sl.step=autoSz*0.02;
+  document.getElementById('ptLabel').textContent=autoSz.toFixed(4);
+
+  pc=new THREE.Points(geo,new THREE.PointsMaterial({
+    size:autoSz, vertexColors:true, sizeAttenuation:true,
+    map:ptTex, transparent:true, alphaTest:0.01,
+    depthWrite:true, depthTest:true
+  }));
+  scene.add(pc);
+
+  camera.position.set(pcCenter.x+sceneSize*0.9,pcCenter.y+sceneSize*0.7,pcCenter.z+sceneSize*0.9);
+  camera.near=sceneSize*0.0001;camera.far=sceneSize*20;
+  camera.updateProjectionMatrix();
+  controls.target.copy(pcCenter);controls.update();
+
+  addHelpers(pcCenter,sceneSize);
+  curGen=m.generation;
+  updateColorbar(m.colormap);
+}
+
+async function poll(){
+  try{
+    var m=await fetch('/api/meta').then(function(r){return r.json()});
+    if(m.generation!==curGen){
+      curGen=m.generation;
+      var col=new Float32Array(await(await fetch('/api/colors.bin')).arrayBuffer());
+      if(pc)pc.geometry.setAttribute('color',new THREE.BufferAttribute(col,3));
+      document.getElementById('title').textContent=m.query;
+      document.getElementById('stats').textContent=m.stats+' | Points: '+nPts.toLocaleString();
+      updateColorbar(m.colormap);
+    }
+  }catch(e){}
+}
+
+function updateColorbar(cmap){
+  var el=document.getElementById('colorbar'),lbl=document.getElementById('colorbar-labels');
+  if(cmap){
+    el.style.display='block';lbl.style.display='flex';
+    var s=[];for(var i=0;i<20;i++){var t=i/19;s.push('rgb('+jR(t)+','+jG(t)+','+jB(t)+')');}
+    el.style.background='linear-gradient(to bottom,'+s.join(',')+')';
+  }else{el.style.display='none';lbl.style.display='none';}
+}
+function jR(t){return Math.round(Math.min(255,Math.max(0,255*(1.5-Math.abs(4*t-3)))))}
+function jG(t){return Math.round(Math.min(255,Math.max(0,255*(1.5-Math.abs(4*t-2)))))}
+function jB(t){return Math.round(Math.min(255,Math.max(0,255*(1.5-Math.abs(4*t-1)))))}
+
+function animate(){requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}
+init();
+})();
+</script>
+</body></html>

@@ -1,0 +1,28 @@
+# PLAF: Pixel-wise Language-Aligned Features for 3D Scene Understanding
+
+# Core
+torch>=1.10.0
+torchvision>=0.10.0
+numpy>=1.19.0
+pillow>=8.0.0
+opencv-python>=4.5.0
+einops>=0.4.0
+pyyaml>=5.3.0
+tqdm>=4.50.0
+
+# Models
+radio-models>=0.1.0
+git+https://github.com/facebookresearch/segment-anything.git
+openai-clip>=1.0.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# ScanNet preprocessing
+imageio>=2.9.0
+pypng>=0.0.20
+
+# Optional dependencies (install as needed):
+# flask>=2.0.0        # Web-based 3D point cloud viewer
+# plyfile>=0.7.4      # ScanNet PLY loading (preprocess_scannet.py --include-3d)
+# open3d>=0.13.0      # Desktop 3D viewer (fallback)

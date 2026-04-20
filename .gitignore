@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual Environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Data
+data/
+
+# Model checkpoints
+checkpoints/
+*.pth
+*.pt
+
+# Extracted features
+*.pkl
+
+# Results and logs
+results/
+logs/
+wandb/
+
+# Torch hub cache
+torch_hub/
+
+# Claude Code
+.claude/
